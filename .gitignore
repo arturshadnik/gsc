@@ -19,3 +19,7 @@
 
 # Go workspace file
 go.work
+
+# Python stuff for testing
+*__pycache__
+*.venv
