@@ -14,35 +14,29 @@ import numpy as np
 import re
 from sklearn.metrics.pairwise import cosine_similarity
 import PyPDF2
+from time import time
 
-async def process_text(text: str, model: str, exit_on_fail: bool = False) -> Coroutine[Any, Any, Tuple[List[str], List[List[float]]]]:
+from local_embedding import create_embeddings
+
+async def process_text(text: str, model: str) -> Coroutine[Any, Any, Tuple[List[str], List[List[float]]]]:
     try:
         sentences = chunk_by_sentece(text)
         sentences = combine_sentences(sentences)
 
         print("creating embeddings of sentences")
-        tasks = [get_embeddings(sentence['combined_sentences'], model) for sentence in sentences]
 
-        embeddings = await asyncio.gather(*tasks, return_exceptions=True)
-        if exit_on_fail:
-            if any(isinstance(em, Exception) for em in embeddings):
-                raise Exception("One or more sub-tasks failed")
-        else:
-            embeddings = [em for em in embeddings if not isinstance(em, Exception)]
-
+        embeddings = await get_embeddings(sentences, model)
         for i, s in enumerate(sentences):
             s['embedding'] = embeddings[i]
 
         print("calculating distances")
         distances, sentences = calculate_cosine_distances(sentences)
-        threshold = calculate_threshold(distances, "percentile", percentile=80)
+        threshold = calculate_threshold(distances, "percentile", percentile=70)
 
         idx_above_thresh = [i for i, dist, in enumerate(distances) if dist > threshold]
-
         chunks = create_final_chunks(sentences, idx_above_thresh)
-        tasks = [get_embeddings(chunk, model) for chunk in chunks]
-        embedded_chunks = await asyncio.gather(*tasks)
-
+        
+        embedded_chunks = await get_embeddings(chunks, model)
         return chunks, embedded_chunks
     except Exception as e:
         print("something went wrong", e)
@@ -74,7 +68,18 @@ def combine_sentences(sentences: List[dict], buffer_size: int = 1) -> List[dict]
 
     return sentences
 
-async def get_embeddings(text: str, model: str) -> List[float]:
+async def get_embeddings(chunks: List[str] | List[dict], model: str) -> List[List[float]]:
+    if isinstance(chunks[0], dict):
+        text = [s["combined_sentences"] for s in chunks]
+    else: 
+        text = chunks
+
+    if model in ["text-embedding-3-small", "text-embedding-3-large"]:
+        return await get_embeddings_oai(text, model)
+    elif model == "mxbai-embed-large-v1":
+        return create_embeddings(text)
+
+async def get_embeddings_oai(text: List[str], model: str) -> List[List[float]]:
     aclient = AsyncOpenAI()
 
     try:
@@ -82,11 +87,11 @@ async def get_embeddings(text: str, model: str) -> List[float]:
             model=model,
             input=text,
         )
-
-        return response.data[0].embedding
+        embeddings = [e.embedding for e in response.data]
+        return embeddings
     except Exception as e:
         print("Error getting embeddings", e)
-        raise
+        raise   
 
 def calculate_cosine_distances(sentences: List[dict]) -> Tuple[List[float], List[dict]]:
     distances = []
@@ -94,7 +99,7 @@ def calculate_cosine_distances(sentences: List[dict]) -> Tuple[List[float], List
         for i in range(len(sentences) - 1):
             em_current = sentences[i]['embedding']
             em_next = sentences[i+1]['embedding']
-
+            
             similarity = cosine_similarity([em_current], [em_next])[0][0]
 
             distance = 1 - similarity
@@ -129,8 +134,7 @@ def create_final_chunks(sentences: List[dict], idx: List[int]) -> List[str]:
 
 
 if __name__ == "__main__":
-    file_path = input("enter a path to a pdf: ")
-    
+    file_path = "C:\\Users\\artur\\Desktop\\test_files\\Resume-Artur_ShadNik-SWE-Mar24.pdf"
     with open(file_path, 'rb') as file:
         pdf_reader = PyPDF2.PdfReader(file)
         num_pages = len(pdf_reader.pages)
@@ -142,7 +146,7 @@ if __name__ == "__main__":
             text += page_text
 
         print("successfully parsed pdf")
-    chunks, embeddings = asyncio.run(process_text(text, "text-embedding-3-small", False))
-
-    
-
+    start = time()
+    chunks, embeddings = asyncio.run(process_text(text, "mxbai-embed-large-v1"))
+    print(chunks[0], len(embeddings[0]))
+    print(time() - start)
